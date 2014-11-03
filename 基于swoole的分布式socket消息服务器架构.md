@@ -1,188 +1,222 @@
-&#160;&#160;&#160;&#160;消息服务器使用socket，为避免服务器过载，单台只允许500个socket连接，当一台不够的时候，扩充消息服务器是必然，问题来了，如何让链接在不同消息服务器上的用户可以实现消息发送呢？
+昨天初步实现了不同聊天服务器消息互发,但效率不好，且有性能瓶颈，Swoole的作者韩天峰提醒可以使用长连接转发消息，今天测试了一遍，效果不错。
 
-&#160;&#160;&#160;&#160;要实现消息互通就必须要让这些消息服务器本身能互通，想了两个方式，一种是消息服务器之间交叉链接，另一种是增加一个特殊的消息服务器，这个消息服务器不对外开放，只负责消息转发和推送。
+上一篇的逻辑讲的不是很清楚，这次清楚的描述下：现有`A`、`B`两台消息服务器，`用户1`连接在服务器`A`，`用户2`连接在服务器`B`，而`用户1`需要给`用户2`发送消息，由于`Socket`连接在不同服务器，无法直接互通。现有两种办法解决：
 
-&#160;&#160;&#160;&#160;**下列测试不考虑防火墙等。仅测试可行性和效率。**
+**1. 消息服务器进行串联**
 
-## 测试环境
-
-*   ##### 消息服务器
+*   **优点**
     
-        192.168.0.201 9501 192.168.0.202 9501
+    不用单独增加服务器来做`proxy`，服务器与服务器之间可酌情采用**长连接/短链接**。
+    
+    消息少一次传输，可以减少网络消耗。
+
+*   **缺点**
+    
+    每台服务器必须和剩下的所有服务器建立连接。如果其中任意一个连接断掉，都会影响服务，服务器多的时候也不利于**监控服务状态**。
+
+**2. 单独使用服务器做转发 并联**
+
+*   **优点**
+    
+    消息服务器专注于消息收发，不再发起`Client`，专注于服务端本身。
+    
+    转发服务器发起`Client`连接所有消息服务器，利于监控服务器状态，而且`转发服务器`宕机不影响`消息服务器`，对用户的影响时间短。
+    
+    可以使用`keepalived`来给`转发服务器`做高可用，或者把转发服务器做成`连接池`，进一步减轻单台服务器的压力。
+    
+    更可以把一个转发服务器和几台消息服务器做成一个节点，再把这些节点组合起来，可以满足超大的即时通讯服务。
+
+*   **缺点**
+    
+    由于消息通过转发服务器，会比直接串联多一次数据传输，增加了网络消耗。
+    
+    暂时没想到其他的。
+
+## 开始搭建
+
+*   **流程图**
+    
+    ![enter image description here][1]
+
+*   **环境**
+    
+    所有测试在虚拟机上进行：
+    
+    *   **主机**
         
-
-*   ##### 转发服务器
+            os  Ubuntu14.10 64位
+            cpu 4 core
+            mem 16 G
+            soft Virtual box           
     
-        192.168.0.203 9501
+    *   **虚拟机**
         
-
-*   ##### 公共缓存
+            centos 6.5 mini swoole php//
+            192.168.0.201   //socket1 消息服务器
+            192.168.0.202   //socket2 消息服务器
+            192.168.0.203   //proxy   转发服务器
+            192.168.0.231   //Redis           
     
-        Redis 192.168.0.231 6379
+    *   **客户端**
         
+            telnet 
+            
+## 编码
 
-*   ##### 软件环境
+*   **消息服务器**
     
-        centos 6.5 mini swoole php
+    由于消息服务器不再发起`客户端连接`,所以代码要精简很多。直接上测试代码：
+    
+        <?php
         
+        /**
+         * @filename server.php
+         * @encoding UTF-8
+         * @author CaiXin Liao <king.liao@qq.com>
+         * @link http://www.51zhima.com
+         * @copyright 51zhima@CopyRight
+         * @datetime 2014-10-28 15:09:54
+         * @version 1.0
+         * @Description 
+         */
+        //服务端
+        $serv = new swoole_server("0.0.0.0", 9501);
+        
+        //redis
+        $redis = new \Redis();
+        $redis->connect("192.168.0.231", 6379);
+        
+        //Server
+        $serv->on('start', function($serv) {
+            echo "Service:Start...";
+        });
+        $serv->on('connect', function ($serv, $fd) {
+        
+        });
+        $serv->on('receive', function ($serv, $fd, $from_id, $data) {
+            global $redis;
+        
+            $data = (array) json_decode($data);
+            $cmd = $data['cmd'];
+        
+            switch ($cmd) {
+        
+                case "login"://登陆
+                    //保存连接信息
+                    $save = array(
+                        'fd' => $fd,
+                        'socket_ip' => "192.168.0.201"
+                    );
+                    $redis->set($data['name'], serialize($save));
+                    break;
+        
+                case "chat":
+                    $recv = unserialize($redis->get($data['recv']));
+                    if ($recv['socket_ip'] != "192.168.0.201") {//发消息给proxy
+                       $proxy = unserialize($redis->get('192.168.0.201_router'));
+                        //需要转发
+                        $data['recv_ip'] = $recv['socket_ip'];
+                        $serv->send($proxy['fd'], json_encode($data));
+                    } else {
+                        //直接发送
+                        $serv->send($recv['fd'], "{$data['send']}给您发了消息：{$data['content']}\n");
+                    }
+                    break;
+            }
+        });
+        $serv->on('close', function ($serv, $fd) {
+            echo "Client: Close.\n";
+        });
+        
+        $serv->start();
+        
+    不同的消息服务器只需修改ip即可。
 
-## 流程图
-
-*   整个流程图如下： 
-
-![enter image description here][1]
-
-*   流程图说明：  
-    `client1`可向`client2`或者其他`client`发送消息，并接收其他`client`发送的消息.
+*   **转发服务器**
     
-    `Redis`中保存`client`连接的信息，给每个用户分配唯一的`key`,包括链接的哪台服务器,转发服务器定时检测消息服务器，如消息服务器挂掉，由转发服务器清理掉Redis已经挂掉的所有链接。
-
-*   完整的流程：
+    转发服务器需要遍历连接所有的消息服务器，并且采用`异步`的方式，测试代码：
     
-    1\.`Client1`给`Client2`发送一条消息
-    
-    2\.`Socket1`接收到消息，根据`key从Redis`取出`Client2`的连接信息，连接在本机，直接推送给`Client2`，流程结束。
-    
-    3\.如果连接不在本机，把消息推送到转发服务器,由转发服务器把该消息推送给连接所在消息服务器，消息服务器接收消息，推送给`Client2`。
-    
-    4\.消息发送结束。
-
-## 编码实现
-
-Socket 在socket1上创建一个server.php,内容如下：
-
-    <?php //服务端 
-     $serv = new swoole_server("0.0.0.0", 9501);
-    
-    //redis
-    $redis = new \Redis();        
-    $redis->connect("192.168.0.231", 6379);
-    
-    //client
-    $proxy = new swoole_client(SWOOLE_TCP | SWOOLE_KEEP);
-    $proxy->connect("192.168.0.203", 9501);
-    
-    $serv->on('start', function($serv) {
-        echo "Service:Start...";
-    });
-    $serv->on('connect', function ($serv, $fd) {
-    
-    });
-    $serv->on('receive', function ($serv, $fd, $from_id, $data) {
-        global $redis;
-    
-        $data = (array) json_decode($data);
-        $cmd = $data['cmd'];
-    
-        switch ($cmd) {
-    
-            case "login"://登陆
-                //保存连接信息
-                $save = array(
-                    'fd' => $fd,
-                    'socket_ip' => "192.168.0.201"
+        <?php
+        
+        /**
+         * @filename proxy.php
+         * @encoding UTF-8
+         * @author CaiXin Liao <king.liao@qq.com>
+         * @link http://www.51zhima.com
+         * @copyright 51zhima@CopyRight
+         * @datetime 2014-10-29 15:50:37
+         * @version 1.0
+         * @Description 
+         */
+        
+        $clients = array();
+        $servers = array(
+            '192.168.0.201',
+            '192.168.0.202',
+        );
+        for ($i = 0; $i < count($servers); $i++) {
+            $clients[$servers[$i]] = new swoole_client(SWOOLE_SOCK_TCP, SWOOLE_SOCK_ASYNC);
+            $clients[$servers[$i]]->remote_ip = $servers[$i];
+            $clients[$servers[$i]]->on("connect", function(swoole_client $cli) {
+                $data = array(
+                    'cmd'=>'login',
+                    'name'=>$cli->remote_ip . '_router',
                 );
-                $redis->set($data['name'], serialize($save));
-                break;
-    
-            case "chat":
-                $recv = unserialize($redis->get($data['recv']));
-                if ($recv['socket_ip'] != "192.168.0.201") {
-                    //需要转发
-                    $data['cmd'] = 'forward';
-                    $data['recv_ip'] = $recv['socket_ip'];
-                    $serv->task(json_encode($data));
-                } else {
-                    //直接发送
-                    $serv->send($recv['fd'], "{$data['send']}给您发了消息：{$data['content']}");
-                }
-                break;
-    
-            case "forward"://接收转发消息
-                $recv = unserialize($redis->get($data['recv']));
-                $serv->send($recv['fd'], "{$data['send']}给您发了消息：{$data['content']}");
-    
-                break;
+                $cli->send(json_encode($data));
+                echo $cli->remote_ip . " Connect Success \n";
+            });
+        
+            $clients[$servers[$i]]->on("receive", function (swoole_client $cli, $data) {
+                $msg = (array) json_decode($data);
+                $remote_ip = $msg['recv_ip'];
+                unset($msg['recv_ip']);
+                global $clients;
+                $clients[$remote_ip]->send(json_encode($msg));
+            });
+            $clients[$servers[$i]]->on("error", function(swoole_client $cli) {
+                echo "{$cli->remote_ip} error\n";
+            });
+        
+            $clients[$servers[$i]]->on("close", function(swoole_client $cli) {
+                echo "{$cli->remote_ip} Connection close\n";
+            });
+            $clients[$servers[$i]]->connect($servers[$i], 9501, 0.5);
         }
-        //$serv->send($fd, 'Swoole: ' . $data);
-    });
-    $serv->on('task', function ($serv, $task_id, $from_id, $data) {
-        global $proxy;
-        $proxy->send($data);
-    });
-    
-    $serv->on('finish', function ($serv, $task_id, $data) {
-    
-    });
-    $serv->on('close', function ($serv, $fd) {
-        echo "Client: Close.\n";
-    });
-    
-    $serv->set(array('task_worker_num' => 4));
-    
-    $serv->start();
-    
-
-在socket2上只需把ip变更一下即可。192.168.0.201变更为192.168.0.202.
-
-Proxy 在转发服务器上建立脚本proxy.php，内容如下：
-
-    $serv = new swoole_server("0.0.0.0", 9501); //服务端
-    $serv->on('start', function($serv) {
-        echo "Service:Start...";
-    });
-    $serv->on('connect', function ($serv, $fd) {
-    
-    });
-    $serv->on('receive', function ($serv, $fd, $from_id, $data) {
-        global $redis;
-        $serv->task($data);
-    });
-    $serv->on('task', function ($serv, $task_id, $from_id, $data) {
-        $forward = (array) json_decode($data);
-        $client = new swoole_client(SWOOLE_SOCK_TCP, SWOOLE_SOCK_SYNC);
-    
-        $client->connect($forward['recv_ip'], 9501);
-        unset($forward['recv_ip']);
-        $client->send(json_encode($forward));
-        $client->close();
-    });
-    
-    $serv->on('finish', function ($serv, $task_id, $data) {
-    
-    });
-    $serv->on('close', function ($serv, $fd) {
-        echo "Client: Close.\n";
-    });
-    
-    $serv->set(array('task_worker_num' => 4));
-    
-    $serv->start();
-    
 
 ## 测试
 
-**注意开启顺序**  
-1\.开启转发服务器php proxy.php  
-2\.分别开启socket服务器php server.php
+  开启所有的虚拟机，同步脚本，这里在`proxy脚本`里没有做监控和连接状态检测，这里只做简单的消息发送测试。
 
-![enter image description here][2]
+  * **开启消息服务器1：**
 
-可以在转发服务器上看到两个消息服务器已经连接  
-3\.开始测试，分别打开两个telnet,连接两个消息服务器，发送消息测试：  
-登陆
+    ![enter image description here][2]
 
-![enter image description here][3]
+  * **开启消息服务器2：**
 
-发送消息测试
+    ![enter image description here][3]
 
-![enter image description here][4]
+  * **开启转发服务器**
 
-消息成功接收。
+    ![enter image description here][4]
 
-基于强大的`swoole`扩展，让php高效的实现这些成为可能，目前消息服务器到转发服务器是长连接，转发服务器到消息服务器是短连接，存在性能瓶颈，也浪费了连接资源。下一步改造成长连接，消息服务器的client使用异步。
+  * **telnet登陆两个用户到socket1和socket2**
 
- [1]: http://blog.molibei.com/wp-content/uploads/2014/10/dispersed-socket.jpg
- [2]: http://blog.molibei.com/wp-content/uploads/2014/10/socket-accept.jpg
- [3]: http://blog.molibei.com/wp-content/uploads/2014/10/socket-login-201.jpg
- [4]: http://blog.molibei.com/wp-content/uploads/2014/10/socket-msg-recv.jpg
+    ![enter image description here][5]
+
+  * **现在用户2给用户1发送消息测试**
+
+    ![enter image description here][6]
+
+    成功收到消息，后面就是进行针对性的优化了。
+
+  * **消息格式**
+
+        {"cmd":"login","name":"zhima201"} //登陆消息
+        {"cmd":"chat","send":"zhima201","recv":"zhima202","content":"how are youe"}//文本消息
+
+ [1]: http://blog.molibei.com/usr/uploads/2014/10/socket-dispersed-v2.jpg
+ [2]: http://blog.molibei.com/usr/uploads/2014/10/socket-msg1-start.jpg
+ [3]: http://blog.molibei.com/usr/uploads/2014/10/socket-msg2-start.jpg
+ [4]: http://blog.molibei.com/usr/uploads/2014/10/socket-proxy-start.jpg
+ [5]: http://blog.molibei.com/usr/uploads/2014/10/socket-login-user.jpg
+ [6]: http://blog.molibei.com/usr/uploads/2014/10/socket-user2-send-user1.jpg
