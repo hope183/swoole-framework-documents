@@ -214,9 +214,9 @@
         {"cmd":"login","name":"zhima201"} //登陆消息
         {"cmd":"chat","send":"zhima201","recv":"zhima202","content":"how are youe"}//文本消息
 
- [1]: http://blog.molibei.com/usr/uploads/2014/10/socket-dispersed-v2.jpg
- [2]: http://blog.molibei.com/usr/uploads/2014/10/socket-msg1-start.jpg
- [3]: http://blog.molibei.com/usr/uploads/2014/10/socket-msg2-start.jpg
- [4]: http://blog.molibei.com/usr/uploads/2014/10/socket-proxy-start.jpg
- [5]: http://blog.molibei.com/usr/uploads/2014/10/socket-login-user.jpg
- [6]: http://blog.molibei.com/usr/uploads/2014/10/socket-user2-send-user1.jpg
+ [1]: http://blog.molibei.com/wp-content/uploads/2014/10/socket-dispersed-v2.jpg
+ [2]: http://blog.molibei.com/wp-content/uploads/2014/10/socket-msg1-start.jpg
+ [3]: http://blog.molibei.com/wp-content/uploads/2014/10/socket-msg2-start.jpg
+ [4]: http://blog.molibei.com/wp-content/uploads/2014/10/socket-proxy-start.jpg
+ [5]: http://blog.molibei.com/wp-content/uploads/2014/10/socket-login-user.jpg
+ [6]: http://blog.molibei.com/wp-content/uploads/2014/10/socket-user2-send-user1.jpg
